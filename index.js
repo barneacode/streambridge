@@ -158,7 +158,7 @@ function baseManifest () {
   return {
     id      : "org.streambridge.embyresolver",
     version,
-    name    : "StreamBridge: Emby to Stremio",
+    name    : "StreamBridge",
     description:
       "Stream media from your Emby server using IMDb/TMDB/Tvdb/Anidb IDs.",
     catalogs : [],
