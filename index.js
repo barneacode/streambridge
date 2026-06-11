@@ -9,6 +9,7 @@ const path         = require("path");
 const cors         = require("cors");
 const rateLimit    = require("express-rate-limit");
 const axios        = require("axios");
+const logger       = require("./lib/logger");
 const embyClient   = require("./lib/embyClient");
 const { redactServerUrl } = require("./lib/redact");
 const { version } = require("./package.json");
@@ -27,14 +28,15 @@ async function performEnvAuth() {
   const password  = process.env.EMBY_PASSWORD || "";
 
   if (!rawServer || !username) return;
+  logger.debug("[ENV] performEnvAuth reading env", { hasServer: !!rawServer, hasUser: !!username });
 
   const serverUrl = rawServer.trim().replace(/\/+$/, "");
   if (!serverUrl.startsWith("http://") && !serverUrl.startsWith("https://")) {
-    console.warn("[ENV] EMBY_SERVER must start with http:// or https://");
+    logger.warn("[ENV] EMBY_SERVER must start with http:// or https://");
     return;
   }
 
-  console.log("[ENV] EMBY_SERVER + EMBY_USER found — authenticating…");
+  logger.info("[ENV] EMBY_SERVER + EMBY_USER found — authenticating…");
   try {
     const ax = await axios({
       method: "POST",
@@ -50,7 +52,7 @@ async function performEnvAuth() {
 
     if (ax.status !== 200) {
       const msg = ax.data?.Message || ax.data?.message || `HTTP ${ax.status}`;
-      console.warn("[ENV] Auth failed:", redactServerUrl(serverUrl), "→", ax.status, msg);
+      logger.warn("[ENV] Auth failed:", redactServerUrl(serverUrl), "→", ax.status, msg);
       return;
     }
 
@@ -58,15 +60,15 @@ async function performEnvAuth() {
     const accessToken = ax.data?.AccessToken;
 
     if (!userId || !accessToken) {
-      console.warn("[ENV] Auth failed: missing User.Id or AccessToken in response");
+      logger.warn("[ENV] Auth failed: missing User.Id or AccessToken in response");
       return;
     }
 
     envAuthConfig = { serverUrl, userId, accessToken };
-    console.log("[ENV] Auth successful — env config ready");
+    logger.info("[ENV] Auth successful — env config ready");
   } catch (e) {
     const msg = e?.code || e?.message || "Request failed";
-    console.warn("[ENV] Auth error:", redactServerUrl(rawServer), "→", msg);
+    logger.warn("[ENV] Auth error:", redactServerUrl(rawServer), "→", msg);
   }
 }
 
@@ -83,19 +85,32 @@ const embyAuthLimiter = rateLimit({
 
 app.use(express.json({ limit: "2kb" }));
 
+app.use((req, res, next) => {
+  logger.info(`[REQ] ${logger.redactCfgPath(req.originalUrl)} from ${req.ip || req.connection?.remoteAddress || "unknown"}`);
+  if (logger.isDebug) {
+    logger.debug("[REQ] headers=", {
+      host: req.headers.host,
+      accept: req.headers.accept,
+      origin: req.headers.origin,
+      referer: req.headers.referer
+    }, "query=", req.query);
+  }
+  next();
+});
+
 app.post("/api/get-emby-tokens", embyAuthLimiter, async (req, res) => {
   const serverUrl = typeof req.body?.serverUrl === "string" ? req.body.serverUrl.trim() : "";
   const username  = typeof req.body?.username === "string" ? req.body.username : "";
   const password  = typeof req.body?.password === "string" ? req.body.password : "";
 
   if (!serverUrl || !username) {
-    console.warn("Auth: missing serverUrl or username");
+    logger.warn("Auth: missing serverUrl or username");
     return res.status(400).json({ err: "serverUrl and username are required" });
   }
 
   const normalizedUrl = serverUrl.replace(/\/+$/, "");
   if (!normalizedUrl.startsWith("http://") && !normalizedUrl.startsWith("https://")) {
-    console.warn("Auth: invalid URL scheme (must be http:// or https://)");
+    logger.warn("Auth: invalid URL scheme (must be http:// or https://)");
     return res.status(400).json({ err: "URL must start with http:// or https://" });
   }
 
@@ -115,7 +130,7 @@ app.post("/api/get-emby-tokens", embyAuthLimiter, async (req, res) => {
 
     if (ax.status !== 200) {
       const msg = ax.data?.Message || ax.data?.message || `HTTP ${ax.status}`;
-      console.warn("Auth failed:", redactServerUrl(normalizedUrl), "→", ax.status, msg);
+      logger.warn("Auth failed:", redactServerUrl(normalizedUrl), "→", ax.status, msg);
       return res.status(400).json({ err: msg });
     }
 
@@ -125,7 +140,7 @@ app.post("/api/get-emby-tokens", embyAuthLimiter, async (req, res) => {
     const serverId = data?.ServerId;
 
     if (!userId || !accessToken) {
-      console.warn("Auth failed:", redactServerUrl(normalizedUrl), "→ invalid response (missing User.Id or AccessToken)");
+      logger.warn("Auth failed:", redactServerUrl(normalizedUrl), "→ invalid response (missing User.Id or AccessToken)");
       return res.status(502).json({ err: "Invalid response from server" });
     }
 
@@ -137,7 +152,7 @@ app.post("/api/get-emby-tokens", embyAuthLimiter, async (req, res) => {
   } catch (e) {
     const msg = e?.response?.data?.Message || e?.response?.data?.message || e?.code || e?.message || "Request failed";
     const code = e?.code || (e?.response?.status ? `HTTP ${e.response.status}` : "");
-    console.warn("Auth failed:", redactServerUrl(normalizedUrl), code ? "→" : "", code || "", msg);
+    logger.warn("Auth failed:", redactServerUrl(normalizedUrl), code ? "→" : "", code || "", msg);
     return res.status(502).json({ err: String(msg) });
   }
 });
@@ -181,6 +196,7 @@ function baseManifest () {
 // Helper: decode the cfg string into an object with defaults for backward compatibility
 // ──────────────────────────────────────────────────────────────────────────
 function decodeCfg(str) {
+  logger.debug("[CFG] decodeCfg start", { inputLength: str?.length });
   const cfg = JSON.parse(Buffer.from(str, "base64url").toString("utf8"));
   
   // Normalize serverUrl: remove trailing slash to prevent double slashes in API calls
@@ -198,14 +214,21 @@ function decodeCfg(str) {
   }
   if (!cfg.hideStreamTypes) cfg.hideStreamTypes = []; // Default: show all stream types
   
-  return cfg;
-}
+  logger.debug("[CFG] decodeCfg result", {
+    serverType: cfg.serverType,
+    showServerName: cfg.showServerName,
+    streamName: cfg.streamName,
+    hideStreamTypes: cfg.hideStreamTypes,
+    hasServerUrl: !!cfg.serverUrl
+  });
 
-// ──────────────────────────────────────────────────────────────────────────
-// Helper: check if a stream should be filtered based on hideStreamTypes config
-// Returns true if the stream matches ANY of the selected types to hide
-// ──────────────────────────────────────────────────────────────────────────
-function shouldFilterStream(stream, hideStreamTypes) {
+  logger.debug("[STREAM] shouldFilterStream", {
+    streamId: stream?.id || stream?.directPlayUrl || "unknown",
+    hideStreamTypes,
+    qualityTag: stream?.mediaInfo?.qualityTag,
+    hdrTag: stream?.mediaInfo?.hdrTag
+  });
+
   if (!hideStreamTypes || hideStreamTypes.length === 0) return false;
   
   const mediaInfo = stream.mediaInfo || {};
@@ -253,16 +276,16 @@ app.get("/:cfg/manifest.json", (req, res) => {
   try {
     cfg = decodeCfg(cfgString);    
   } catch (err) {
-    console.error("[ERROR] Error decoding cfg in manifest route:", err.message);
+    logger.error("[ERROR] Error decoding cfg in manifest route:", err.message);
     // SECURITY: Do not log cfgString as it contains sensitive user credentials (accessToken, userId, serverUrl)
-    console.error("[ERROR] Failed to decode config (cfgString length:", cfgString?.length || 0, ")");
+    logger.error("[ERROR] Failed to decode config (cfgString length:", cfgString?.length || 0, ")");
     return res.status(400).json({ err: "Bad config in URL", details: err.message });
   }
 
   const mf = baseManifest();
 
   if (!mf) {
-    console.error("[FATAL] baseManifest() returned undefined. This is the cause of the error.");
+    logger.error("[FATAL] baseManifest() returned undefined. This is the cause of the error.");
     return res.status(500).json({ err: "Server error: Failed to generate base manifest object." });
   }
 
@@ -286,17 +309,17 @@ app.get("/:cfg/stream/:type/:id.json", async (req, res) => {
   try {
     cfg = decodeCfg(req.params.cfg);
   } catch {
-    console.warn(`[STREAM] ${req.params.type}/${req.params.id} — bad cfg, returning empty`);
+    logger.warn(`[STREAM] ${req.params.type}/${req.params.id} — bad cfg, returning empty`);
     return res.json({ streams: [] });
   }
 
   const { type, id } = req.params;
   if (!cfg.serverUrl || !cfg.userId || !cfg.accessToken) {
-    console.warn(`[STREAM] ${type}/${id} — missing config, returning empty`);
+    logger.warn(`[STREAM] ${type}/${id} — missing config, returning empty`);
     return res.json({ streams: [] });
   }
 
-  console.log(`[STREAM] ${type}/${id} from ${redactServerUrl(cfg.serverUrl)}`);
+  logger.info(`[STREAM] ${type}/${id} from ${redactServerUrl(cfg.serverUrl)}`);
 
   try {
     // JELLYFIN: Always use Emby client - Jellyfin support commented out for future
@@ -331,7 +354,7 @@ app.get("/:cfg/stream/:type/:id.json", async (req, res) => {
           subtitles: (cfg.includeSubtitles === false) ? [] : (s.subtitles || []) // Include subtitles unless user opted out
         };
       });
-    console.log(`[STREAM] ${type}/${id} → ${streams.length} stream(s)`);
+    logger.info(`[STREAM] ${type}/${id} → ${streams.length} stream(s)`);
 
     // Set cache based on whether streams were found
     if (streams.length > 0) {
@@ -343,9 +366,9 @@ app.get("/:cfg/stream/:type/:id.json", async (req, res) => {
     res.json({ streams });
   } catch (e) {
     // SECURITY: Only log error message and stack, not the full error object which might contain config
-    console.error(`[STREAM] ${type}/${id} error:`, e?.message || String(e));
+    logger.error(`[STREAM] ${type}/${id} error:`, e?.message || String(e));
     if (e?.stack && process.env.NODE_ENV === 'development') {
-      console.error("Stack trace:", e.stack);
+      logger.error("Stack trace:", e.stack);
     }
     res.json({ streams: [] });
   }
@@ -358,7 +381,7 @@ app.get("/:cfg/stream/:type/:id.json", async (req, res) => {
 app.get("/manifest.json", (_req, res) => {
   const mf = baseManifest();
   if (!mf) {
-    console.error("[FATAL] baseManifest() returned undefined for fallback route.");
+    logger.error("[FATAL] baseManifest() returned undefined for fallback route.");
     return res.status(500).json({ err: "Server error: Failed to generate base manifest object." });
   }
   res.json(mf);
@@ -378,6 +401,6 @@ app.get("/:cfg/configure", (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────
 performEnvAuth().then(() => {
   app.listen(PORT, () =>
-    console.log(`🚀  StreamBridge up at http://localhost:${PORT}/<cfg>/manifest.json`)
+    logger.info(`🚀  StreamBridge up at http://localhost:${PORT}/<cfg>/manifest.json`)
   );
 });
