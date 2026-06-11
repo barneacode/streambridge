@@ -222,13 +222,46 @@ function decodeCfg(str) {
     hasServerUrl: !!cfg.serverUrl
   });
 
-  logger.debug("[STREAM] shouldFilterStream", {
-    streamId: stream?.id || stream?.directPlayUrl || "unknown",
-    hideStreamTypes,
-    qualityTag: stream?.mediaInfo?.qualityTag,
-    hdrTag: stream?.mediaInfo?.hdrTag
-  });
+  return cfg;
+}
 
+/**
+ * Map internal Emby/Jellyfin stream details to the stream shape expected by
+ * AIOStreams / Stremio addon wrappers.
+ *
+ * AIOStreams validates some fields against its StreamSchema and uses a few
+ * dedicated properties like `behaviorHints.filename`, `behaviorHints.videoSize`
+ * and `title` for better stream parsing.
+ */
+function mapStreamForAIOStreams(stream, streamName, includeSubtitles = true) {
+  const behaviorHints = {
+    filename: stream.mediaInfo?.filename ?? undefined,
+    videoSize: typeof stream.mediaInfo?.size === 'number' ? stream.mediaInfo.size : undefined,
+    notWebReady: true,
+    bingeGroup: `${streamName}-${(stream.qualityTitle || "Direct Play").trim()}`
+  };
+
+  return {
+    name: streamName,
+    title: streamName,
+    description: stream.streamDescription || stream.qualityTitle || "Direct Play",
+    url: stream.directPlayUrl,
+    playbackUrl: stream.directPlayUrl,
+    directPlayUrl: stream.directPlayUrl,
+    qualityTitle: stream.qualityTitle,
+    streamDescription: stream.streamDescription,
+    mediaInfo: stream.mediaInfo,
+    itemId: stream.itemId,
+    mediaSourceId: stream.mediaSourceId,
+    container: stream.container,
+    videoCodec: stream.videoCodec,
+    audioCodec: stream.audioCodec,
+    behaviorHints,
+    subtitles: includeSubtitles ? (stream.subtitles || []) : []
+  };
+}
+
+function shouldFilterStream(stream, hideStreamTypes) {
   if (!hideStreamTypes || hideStreamTypes.length === 0) return false;
   
   const mediaInfo = stream.mediaInfo || {};
@@ -327,34 +360,25 @@ app.get("/:cfg/stream/:type/:id.json", async (req, res) => {
     // const client = cfg.serverType === 'jellyfin' ? jellyfinClient : embyClient;
     const client = embyClient;
     const raw = await client.getStream(id, cfg);
-    
+    const rawStreams = Array.isArray(raw) ? raw : [];
+
     // Get custom stream name from config (defaults based on server type)
     const streamName = cfg.streamName || (cfg.serverType === 'jellyfin' ? 'Jellyfin' : 'Emby');
     
     // Get hideStreamTypes from config (defaults to empty array for backward compatibility)
     const hideStreamTypes = cfg.hideStreamTypes || [];
-         
-    const streams = (raw || [])
-      .filter(s => s.directPlayUrl)
-      .filter(s => !shouldFilterStream(s, hideStreamTypes)) // Filter based on user preferences
-      .map(s => {
-        // Build behaviorHints with enriched data
-        const behaviorHints = {
-          filename: s.mediaInfo?.filename ?? undefined,
-          videoSize: s.mediaInfo?.size ?? undefined,
-          notWebReady: true, // Default to true for safety
-          bingeGroup: `${streamName}-${(s.qualityTitle || "Direct Play").trim()}` // Same stream name+quality = consistent auto-play across episodes
-        };
-        
-        return {
-          name: streamName, // Use custom stream name from config
-          description: s.streamDescription || s.qualityTitle || "Direct Play", // Full detailed technical information
-          url: s.directPlayUrl,
-          behaviorHints: behaviorHints,
-          subtitles: (cfg.includeSubtitles === false) ? [] : (s.subtitles || []) // Include subtitles unless user opted out
-        };
-      });
-    logger.info(`[STREAM] ${type}/${id} → ${streams.length} stream(s)`);
+
+    logger.info(`[STREAM] ${type}/${id} retrieved ${rawStreams.length} raw stream(s)`);
+    logger.info(`[STREAM] ${type}/${id} filter settings: hideStreamTypes=${JSON.stringify(hideStreamTypes)}, includeSubtitles=${cfg.includeSubtitles !== false}`);
+
+    const directPlayStreams = rawStreams.filter(s => s.directPlayUrl);
+    logger.info(`[STREAM] ${type}/${id} direct-play candidates: ${directPlayStreams.length}`);
+
+    const filteredStreams = directPlayStreams.filter(s => !shouldFilterStream(s, hideStreamTypes));
+    logger.info(`[STREAM] ${type}/${id} post-filtered candidates: ${filteredStreams.length}`);
+
+    const streams = filteredStreams.map(s => mapStreamForAIOStreams(s, streamName, cfg.includeSubtitles !== false));
+    logger.info(`[STREAM] ${type}/${id} → ${streams.length} stream(s) returned`);
 
     // Set cache based on whether streams were found
     if (streams.length > 0) {
