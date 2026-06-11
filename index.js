@@ -19,6 +19,57 @@ require("dotenv").config();
 const PORT = process.env.PORT || 7000;
 const app  = express();
 
+let envAuthConfig = null;
+
+async function performEnvAuth() {
+  const rawServer = process.env.EMBY_SERVER;
+  const username  = process.env.EMBY_USER;
+  const password  = process.env.EMBY_PASSWORD || "";
+
+  if (!rawServer || !username) return;
+
+  const serverUrl = rawServer.trim().replace(/\/+$/, "");
+  if (!serverUrl.startsWith("http://") && !serverUrl.startsWith("https://")) {
+    console.warn("[ENV] EMBY_SERVER must start with http:// or https://");
+    return;
+  }
+
+  console.log("[ENV] EMBY_SERVER + EMBY_USER found — authenticating…");
+  try {
+    const ax = await axios({
+      method: "POST",
+      url: `${serverUrl}/Users/AuthenticateByName`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Emby-Authorization": `MediaBrowser Client="StreamBridge", Device="WebHelper", DeviceId="webhelper", Version="${version}"`
+      },
+      data: { Username: username, Pw: password },
+      timeout: 5000,
+      validateStatus: () => true
+    });
+
+    if (ax.status !== 200) {
+      const msg = ax.data?.Message || ax.data?.message || `HTTP ${ax.status}`;
+      console.warn("[ENV] Auth failed:", redactServerUrl(serverUrl), "→", ax.status, msg);
+      return;
+    }
+
+    const userId      = ax.data?.User?.Id;
+    const accessToken = ax.data?.AccessToken;
+
+    if (!userId || !accessToken) {
+      console.warn("[ENV] Auth failed: missing User.Id or AccessToken in response");
+      return;
+    }
+
+    envAuthConfig = { serverUrl, userId, accessToken };
+    console.log("[ENV] Auth successful — env config ready");
+  } catch (e) {
+    const msg = e?.code || e?.message || "Request failed";
+    console.warn("[ENV] Auth error:", redactServerUrl(rawServer), "→", msg);
+  }
+}
+
 app.use(cors());
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -89,6 +140,15 @@ app.post("/api/get-emby-tokens", embyAuthLimiter, async (req, res) => {
     console.warn("Auth failed:", redactServerUrl(normalizedUrl), code ? "→" : "", code || "", msg);
     return res.status(502).json({ err: String(msg) });
   }
+});
+
+app.get("/api/env-config", (_req, res) => {
+  if (!envAuthConfig) return res.json({});
+  res.json({
+    serverUrl:   envAuthConfig.serverUrl,
+    userId:      envAuthConfig.userId,
+    accessToken: envAuthConfig.accessToken
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -226,12 +286,17 @@ app.get("/:cfg/stream/:type/:id.json", async (req, res) => {
   try {
     cfg = decodeCfg(req.params.cfg);
   } catch {
+    console.warn(`[STREAM] ${req.params.type}/${req.params.id} — bad cfg, returning empty`);
     return res.json({ streams: [] });
   }
 
-  const { id } = req.params;
-  if (!cfg.serverUrl || !cfg.userId || !cfg.accessToken)
+  const { type, id } = req.params;
+  if (!cfg.serverUrl || !cfg.userId || !cfg.accessToken) {
+    console.warn(`[STREAM] ${type}/${id} — missing config, returning empty`);
     return res.json({ streams: [] });
+  }
+
+  console.log(`[STREAM] ${type}/${id} from ${redactServerUrl(cfg.serverUrl)}`);
 
   try {
     // JELLYFIN: Always use Emby client - Jellyfin support commented out for future
@@ -266,6 +331,8 @@ app.get("/:cfg/stream/:type/:id.json", async (req, res) => {
           subtitles: (cfg.includeSubtitles === false) ? [] : (s.subtitles || []) // Include subtitles unless user opted out
         };
       });
+    console.log(`[STREAM] ${type}/${id} → ${streams.length} stream(s)`);
+
     // Set cache based on whether streams were found
     if (streams.length > 0) {
       res.set('Cache-Control', 'public, max-age=120');  // Cache for 2 minutes when streams exist
@@ -276,7 +343,7 @@ app.get("/:cfg/stream/:type/:id.json", async (req, res) => {
     res.json({ streams });
   } catch (e) {
     // SECURITY: Only log error message and stack, not the full error object which might contain config
-    console.error("Stream handler error:", e?.message || String(e));
+    console.error(`[STREAM] ${type}/${id} error:`, e?.message || String(e));
     if (e?.stack && process.env.NODE_ENV === 'development') {
       console.error("Stack trace:", e.stack);
     }
@@ -309,6 +376,8 @@ app.get("/:cfg/configure", (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────
 // Start the server
 // ──────────────────────────────────────────────────────────────────────────
-app.listen(PORT, () =>
-  console.log(`🚀  StreamBridge up at http://localhost:${PORT}/<cfg>/manifest.json`)
-);
+performEnvAuth().then(() => {
+  app.listen(PORT, () =>
+    console.log(`🚀  StreamBridge up at http://localhost:${PORT}/<cfg>/manifest.json`)
+  );
+});

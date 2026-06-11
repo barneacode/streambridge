@@ -189,7 +189,11 @@ iframe[id*="kofi-wo-container"] {
     Stream from your Emby server to Stremio<br>
     Need help? See <a href="https://github.com/h4harsimran/streambridge" target="_blank">docs on GitHub</a>.
   </p>
-  
+
+  <div id="envBanner" style="display:none;background:#1a2e1f;border:1px solid var(--accent);border-radius:10px;padding:.85rem 1rem;margin-top:1rem;font-size:.875rem;color:var(--accent)">
+    ✓ Server pre-configured from environment variables — scroll down to install.
+  </div>
+
   <hr class="section-divider">
   <!--  1· Helper  -->
   <h2>1 · Fetch User ID & Token</h2>
@@ -372,6 +376,35 @@ function syncServerType(serverType) {
 
 // Initialize server type on page load (default to Emby)
 syncServerType("emby");
+
+// Pre-fill from environment variables if the server was configured via env
+(async function loadEnvConfig() {
+  try {
+    const res = await fetch("/api/env-config");
+    if (!res.ok) return;
+    const cfg = await res.json();
+    if (!cfg.serverUrl || !cfg.userId || !cfg.accessToken) return;
+
+    // Pre-fill Step 1 helper form (url field only — don't expose credentials in inputs)
+    const helperForm = $("#helper");
+    if (helperForm) helperForm.url.value = cfg.serverUrl;
+
+    // Show the helper output with the resolved tokens
+    $("#uid").textContent = cfg.userId;
+    $("#tok").textContent = cfg.accessToken;
+    $("#helperOut").style.display = "block";
+
+    // Pre-fill Step 2 config form
+    const cfgForm = $("#cfg");
+    if (cfgForm) {
+      cfgForm.serverUrl.value   = cfg.serverUrl;
+      cfgForm.userId.value      = cfg.userId;
+      cfgForm.accessToken.value = cfg.accessToken;
+    }
+
+    $("#envBanner").style.display = "block";
+  } catch {}
+})();
 
 /*── 2 · Helper ──*/
 async function authenticateEmby(serverUrl, username, password) {

@@ -5,4 +5,8 @@ services:
       - "7000:7000"
     environment:
       - PORT=7000
+      # Optional: pre-authenticate on startup so the configure page is pre-filled
+      # - EMBY_SERVER=http://your-emby-server:8096
+      # - EMBY_USER=your_username
+      # - EMBY_PASSWORD=your_password
     restart: unless-stopped
