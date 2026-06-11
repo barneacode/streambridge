@@ -197,32 +197,40 @@ function baseManifest () {
 // ──────────────────────────────────────────────────────────────────────────
 function decodeCfg(str) {
   logger.debug("[CFG] decodeCfg start", { inputLength: str?.length });
-  const cfg = JSON.parse(Buffer.from(str, "base64url").toString("utf8"));
-  
-  // Normalize serverUrl: remove trailing slash to prevent double slashes in API calls
-  if (cfg.serverUrl) {
-    cfg.serverUrl = cfg.serverUrl.replace(/\/+$/, '');
-  }
-  
-  // Set defaults for new features to maintain backward compatibility
-  // If these fields don't exist, use sensible defaults
-  if (!cfg.serverType) cfg.serverType = 'emby'; // Default: Emby for backward compatibility
-  if (cfg.showServerName === undefined) cfg.showServerName = false; // Default: hide server name
-  if (!cfg.streamName) {
-    // Default stream name based on server type
-    cfg.streamName = cfg.serverType === 'jellyfin' ? 'Jellyfin' : 'Emby';
-  }
-  if (!cfg.hideStreamTypes) cfg.hideStreamTypes = []; // Default: show all stream types
-  
-  logger.debug("[CFG] decodeCfg result", {
-    serverType: cfg.serverType,
-    showServerName: cfg.showServerName,
-    streamName: cfg.streamName,
-    hideStreamTypes: cfg.hideStreamTypes,
-    hasServerUrl: !!cfg.serverUrl
-  });
+  try {
+    const cfg = JSON.parse(Buffer.from(str, "base64url").toString("utf8"));
+    
+    // Normalize serverUrl: remove trailing slash to prevent double slashes in API calls
+    if (cfg.serverUrl) {
+      cfg.serverUrl = cfg.serverUrl.replace(/\/+$/, '');
+    }
+    
+    // Set defaults for new features to maintain backward compatibility
+    // If these fields don't exist, use sensible defaults
+    if (!cfg.serverType) cfg.serverType = 'emby'; // Default: Emby for backward compatibility
+    if (cfg.showServerName === undefined) cfg.showServerName = false; // Default: hide server name
+    if (!cfg.streamName) {
+      // Default stream name based on server type
+      cfg.streamName = cfg.serverType === 'jellyfin' ? 'Jellyfin' : 'Emby';
+    }
+    if (!cfg.hideStreamTypes) cfg.hideStreamTypes = []; // Default: show all stream types
+    
+    logger.debug("[CFG] decodeCfg result", {
+      serverType: cfg.serverType,
+      showServerName: cfg.showServerName,
+      streamName: cfg.streamName,
+      hideStreamTypes: cfg.hideStreamTypes,
+      hasServerUrl: !!cfg.serverUrl
+    });
 
-  return cfg;
+    return cfg;
+  } catch (err) {
+    logger.error("[CFG] decodeCfg failed", {
+      error: err?.message || String(err),
+      inputLength: str?.length
+    });
+    throw new Error("Invalid config payload");
+  }
 }
 
 /**
