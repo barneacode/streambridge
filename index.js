@@ -234,24 +234,62 @@ function decodeCfg(str) {
 }
 
 /**
+ * Builds a dot-separated quality string that AIOStreams regex patterns can parse.
+ * e.g. "2160p.REMUX.HDR10.HEVC.10bit.TrueHD.7.1"
+ */
+function buildAIOStreamsParsableTitle(mediaInfo) {
+  const parts = [];
+  if (mediaInfo?.qualityTag && mediaInfo.qualityTag !== 'Unknown') {
+    // Use numeric resolution format for filename-style strings
+    const resMap = { '4K': '2160p', '4K DCI': '2160p' };
+    parts.push(resMap[mediaInfo.qualityTag] || mediaInfo.qualityTag);
+  }
+  if (mediaInfo?.isRemux) parts.push('REMUX');
+  if (mediaInfo?.hdrTag) parts.push(mediaInfo.hdrTag);
+  if (mediaInfo?.videoTag) {
+    // "HEVC 10bit" -> ["HEVC", "10bit"] as separate dot-joined parts
+    mediaInfo.videoTag.split(/\s+/).forEach(p => parts.push(p));
+  }
+  if (mediaInfo?.audioTag) {
+    // "TrueHD 7.1" -> "TrueHD.7.1"
+    parts.push(mediaInfo.audioTag.replace(/\s+/g, '.'));
+  }
+  return parts.join('.') || null;
+}
+
+/**
  * Map internal Emby/Jellyfin stream details to the stream shape expected by
  * AIOStreams / Stremio addon wrappers.
  *
  * AIOStreams validates some fields against its StreamSchema and uses a few
  * dedicated properties like `behaviorHints.filename`, `behaviorHints.videoSize`
  * and `title` for better stream parsing.
+ *
+ * - `name`: multiline — server label + quality summary for display in Stremio and AIOStreams
+ * - `title`: dot-separated quality tokens (e.g. "2160p.HDR10.HEVC.TrueHD.7.1") so
+ *   AIOStreams regex patterns can reliably extract Resolution, Quality, Codec, Audio
+ * - `description`: human-readable multi-line text for native Stremio display
  */
 function mapStreamForAIOStreams(stream, streamName, includeSubtitles = true) {
+  const mediaInfo = stream.mediaInfo;
+
+  // Build a concise quality summary for the name's second line
+  const qualitySummary = [mediaInfo?.qualityTag, mediaInfo?.hdrTag].filter(Boolean).join(' ');
+  const name = qualitySummary ? `${streamName}\n${qualitySummary}` : streamName;
+
+  // Dot-separated string AIOStreams can parse for Resolution/Quality/Codec/Audio
+  const parsableTitle = buildAIOStreamsParsableTitle(mediaInfo);
+
   const behaviorHints = {
-    filename: stream.mediaInfo?.filename ?? undefined,
-    videoSize: typeof stream.mediaInfo?.size === 'number' ? stream.mediaInfo.size : undefined,
+    filename: mediaInfo?.filename ?? undefined,
+    videoSize: typeof mediaInfo?.size === 'number' ? mediaInfo.size : undefined,
     notWebReady: true,
     bingeGroup: `${streamName}-${(stream.qualityTitle || "Direct Play").trim()}`
   };
 
   return {
-    name: streamName,
-    title: streamName,
+    name,
+    title: parsableTitle || streamName,
     description: stream.streamDescription || stream.qualityTitle || "Direct Play",
     url: stream.directPlayUrl,
     playbackUrl: stream.directPlayUrl,
